@@ -154,8 +154,10 @@ def broadcast_event_sync(event: str, data: Dict[str, Any]) -> None:
 
     # Redis Pub/Sub (межпроцессная доставка)
     try:
-        from .realtime.broker import publish as redis_publish
-        if redis_publish(event, data):
+        from .realtime.broker import get_broker
+
+        payload = {'event': event, 'data': data}
+        if get_broker().publish_event('map_updates', payload):
             return
     except Exception:
         pass
@@ -211,17 +213,15 @@ def start_socket_server(
 
         # Redis Pub/Sub (опционально): подписываемся и ретранслируем события клиентам.
         try:
-            from .realtime.broker import get_redis_url, get_channel, subscribe_forever
-            redis_url = get_redis_url()
-            if redis_url:
-                channel = get_channel()
+            from .realtime.broker import get_broker
 
-                async def _on_event(ev, payload):
-                    await _broadcast(ev, payload)
+            async def _on_message(payload):
+                ev = payload.get('event')
+                data = payload.get('data')
+                if isinstance(ev, str) and isinstance(data, dict):
+                    await _broadcast(ev, data)
 
-                asyncio.create_task(
-                    subscribe_forever(redis_url=redis_url, channel=channel, on_event=_on_event)
-                )
+            asyncio.create_task(get_broker().listener('map_updates', _on_message))
         except Exception:
             pass
     # Выполняем корутину один раз для инициализации сервера

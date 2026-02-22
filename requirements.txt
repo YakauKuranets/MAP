@@ -12,6 +12,9 @@ starlette>=0.37
 uvicorn>=0.30
 gunicorn>=21.2
 psycopg2-binary>=2.9
+GeoAlchemy2>=0.15
 redis>=5.0.0
 
 openpyxl>=3.1
+
+openai>=1.0

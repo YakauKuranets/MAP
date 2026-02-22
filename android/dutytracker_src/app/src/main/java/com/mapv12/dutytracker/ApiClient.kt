@@ -6,6 +6,9 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.WebSocketListener
+import okhttp3.WebSocket
+import okhttp3.Response
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
@@ -16,6 +19,12 @@ class ApiHttpException(val statusCode: Int, val responseBody: String) : IOExcept
 
 /** Thrown when server rejects points because provided session_id is no longer active (HTTP 409). */
 class SessionInactiveException(val activeSessionId: String?) : IOException("session_inactive")
+
+
+interface RealtimeEventListener {
+    fun onEvent(event: String, payload: JSONObject)
+    fun onFailure(t: Throwable) {}
+}
 
 class ApiClient(private val ctx: Context) {
     private val client = OkHttpClient.Builder()
@@ -418,6 +427,28 @@ fun pair(code: String): PairResult {
         }
     }
 
+
+
+    fun openRealtimeSocket(listener: RealtimeEventListener): WebSocket {
+        val wsBase = baseUrl().replaceFirst("http://", "ws://").replaceFirst("https://", "wss://")
+        val req = Request.Builder().url("$wsBase/ws").build()
+        return client.newWebSocket(req, object : WebSocketListener() {
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                try {
+                    val json = JSONObject(text)
+                    val event = json.optString("event", "")
+                    val payload = json.optJSONObject("data") ?: JSONObject()
+                    if (event.isNotBlank()) listener.onEvent(event, payload)
+                } catch (e: Exception) {
+                    listener.onFailure(e)
+                }
+            }
+
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                listener.onFailure(t)
+            }
+        })
+    }
 
     fun sendFingerprints(sample: org.json.JSONObject): Boolean {
         val token = deviceToken() ?: return false
