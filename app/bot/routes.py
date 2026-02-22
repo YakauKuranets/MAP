@@ -9,13 +9,17 @@
 """
 
 import json
+import hmac
+import hashlib
 import os
 import uuid
 import time
+from threading import Thread
 from typing import Any, Dict, List, Optional
+from urllib.parse import parse_qsl
 
 import requests
-from flask import Response, jsonify, request, current_app
+from flask import Response, jsonify, request, current_app, render_template
 
 from sqlalchemy.exc import OperationalError
 
@@ -29,6 +33,71 @@ from . import bp
 from ..sockets import broadcast_event_sync
 from ..security.api_keys import require_bot_api_key
 from ..security.rate_limit import check_rate_limit
+from ..services.ai_vision_service import analyze_incident_photo
+
+
+def _validate_telegram_init_data(init_data: str, bot_token: str) -> bool:
+    """Проверка подписи Telegram WebApp initData по официальной схеме."""
+    if not init_data or not bot_token:
+        return False
+
+    items = dict(parse_qsl(init_data, keep_blank_values=True))
+    got_hash = (items.pop("hash", "") or "").strip()
+    if not got_hash:
+        return False
+
+    data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(items.items(), key=lambda kv: kv[0]))
+    secret_key = hmac.new(b"WebAppData", bot_token.encode("utf-8"), hashlib.sha256).digest()
+    calc_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(calc_hash, got_hash)
+
+
+
+def _resolve_photo_path(photo_value: Optional[str]) -> Optional[str]:
+    if not photo_value:
+        return None
+    pv = photo_value.strip()
+    if not pv:
+        return None
+    if pv.startswith('http://') or pv.startswith('https://'):
+        return None
+    if os.path.isabs(pv) and os.path.isfile(pv):
+        return pv
+    up = current_app.config.get('UPLOAD_FOLDER')
+    if up:
+        candidate = os.path.join(up, pv)
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+def _run_ai_vision_job(app, pending_id: int, image_path: str) -> None:
+    with app.app_context():
+        result = analyze_incident_photo(image_path) or {}
+        pending = PendingMarker.query.get(pending_id)
+        if not pending:
+            return
+        tags = result.get('tags') if isinstance(result.get('tags'), list) else []
+        pending.ai_tags = tags
+        if isinstance(result.get('priority'), int):
+            pending.priority = result.get('priority')
+        if (result.get('category') or '').strip():
+            pending.category = (result.get('category') or '').strip()
+        db.session.commit()
+        broadcast_event_sync('incident_updated', {
+            'id': pending.id,
+            'priority': pending.priority,
+            'tags': pending.ai_tags or [],
+            'category': pending.category,
+        })
+
+
+def _schedule_ai_vision_for_pending(pending_id: int, photo_value: Optional[str]) -> None:
+    image_path = _resolve_photo_path(photo_value)
+    if not image_path:
+        return
+    app_obj = current_app._get_current_object()
+    Thread(target=_run_ai_vision_job, args=(app_obj, pending_id, image_path), daemon=True).start()
 
 # ---------------------------------------------------------------------------
 # Вспомогательная функция поиска дубликатов в базе данных
@@ -289,7 +358,67 @@ def add_marker_from_bot() -> Response:
         'lat': lat,
         'lon': lon,
     })
+    _schedule_ai_vision_for_pending(pid, photo_filename)
     return jsonify({'pending': pid, 'status': 'pending'}), 200
+
+
+@bp.get('/webapp')
+def bot_webapp() -> Response:
+    """Мини-приложение Telegram для отправки заявки."""
+    return render_template("webapp.html")
+
+
+@bp.post('/webapp_submit')
+def bot_webapp_submit() -> Response:
+    """Приём заявки из Telegram Mini App с проверкой initData."""
+    payload = request.get_json(silent=True) or {}
+    init_data = (payload.get("initData") or "").strip()
+    bot_token = (current_app.config.get("TELEGRAM_BOT_TOKEN") or "").strip()
+
+    if not _validate_telegram_init_data(init_data, bot_token):
+        return jsonify({"error": "forbidden"}), 403
+
+    items = dict(parse_qsl(init_data, keep_blank_values=True))
+    user_data = {}
+    try:
+        user_data = json.loads(items.get("user") or "{}")
+    except Exception:
+        user_data = {}
+
+    lat = parse_coord((payload.get("coords") or {}).get("lat") if isinstance(payload.get("coords"), dict) else payload.get("lat"))
+    lon = parse_coord((payload.get("coords") or {}).get("lon") if isinstance(payload.get("coords"), dict) else payload.get("lon"))
+    if not in_range(lat, lon):
+        return jsonify({"error": "invalid_coordinates"}), 400
+
+    category = (payload.get("category") or "Прочее").strip()
+    description = (payload.get("description") or "").strip()
+    photo = (payload.get("photo") or "").strip() or None
+
+    pending = PendingMarker(
+        name=f"MiniApp: {category}",
+        lat=lat,
+        lon=lon,
+        notes=description,
+        status="webapp",
+        link="",
+        category=category,
+        photo=photo,
+        reporter=(user_data.get("last_name") or user_data.get("username") or "").strip() or None,
+        user_id=str(user_data.get("id")) if user_data.get("id") is not None else None,
+    )
+    db.session.add(pending)
+    db.session.flush()
+    db.session.add(PendingHistory(pending_id=pending.id, status='pending'))
+    db.session.commit()
+
+    broadcast_event_sync('pending_created', {
+        'id': pending.id,
+        'name': pending.name,
+        'lat': lat,
+        'lon': lon,
+    })
+    _schedule_ai_vision_for_pending(pending.id, photo)
+    return jsonify({"ok": True, "pending": pending.id}), 200
 
 
 @bp.get('/markers/<int:pid>')
@@ -417,4 +546,3 @@ def bot_my_requests(user_id: str) -> Response:
         )
 
     return jsonify({'items': items}), 200
-

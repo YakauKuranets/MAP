@@ -5,6 +5,8 @@ import android.content.Intent
 import androidx.core.content.ContextCompat
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.ExistingWorkPolicy
+import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
@@ -16,8 +18,6 @@ class WatchdogWorker(appContext: Context, params: WorkerParameters) : CoroutineW
 
     override suspend fun doWork() = withContext(Dispatchers.IO) {
         val ctx = applicationContext
-
-        // If tracking should be on but service is not running, restart it.
         val should = ForegroundLocationService.isTrackingOn(ctx)
         val running = StatusStore.isServiceRunning(ctx)
         if (should && !running) {
@@ -35,15 +35,23 @@ class WatchdogWorker(appContext: Context, params: WorkerParameters) : CoroutineW
 
     companion object {
         private const val UNIQUE_NAME = "dutytracker_watchdog"
+        private const val IMMEDIATE_NAME = "dutytracker_watchdog_immediate"
 
         fun ensureScheduled(ctx: Context) {
-            val req = PeriodicWorkRequestBuilder<WatchdogWorker>(15, TimeUnit.MINUTES)
+            val periodic = PeriodicWorkRequestBuilder<WatchdogWorker>(15, TimeUnit.MINUTES)
                 .setInitialDelay(15, TimeUnit.MINUTES)
                 .build()
             WorkManager.getInstance(ctx).enqueueUniquePeriodicWork(
                 UNIQUE_NAME,
                 ExistingPeriodicWorkPolicy.UPDATE,
-                req
+                periodic
+            )
+
+            val immediate = OneTimeWorkRequestBuilder<WatchdogWorker>().build()
+            WorkManager.getInstance(ctx).enqueueUniqueWork(
+                IMMEDIATE_NAME,
+                ExistingWorkPolicy.REPLACE,
+                immediate
             )
         }
     }

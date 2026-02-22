@@ -9,12 +9,33 @@
 import json
 from typing import Any, Dict, Optional
 
+try:
+    from geoalchemy2 import Geometry
+except Exception:  # pragma: no cover - fallback for environments without GeoAlchemy2
+    from sqlalchemy.types import UserDefinedType
+
+    class Geometry(UserDefinedType):
+        def __init__(self, geometry_type: str = "POINT", srid: int = 4326):
+            self.geometry_type = geometry_type
+            self.srid = srid
+
+        def get_col_spec(self, **kw):
+            return "GEOMETRY"
+
+from sqlalchemy import func
 from sqlalchemy import UniqueConstraint
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.ext.hybrid import hybrid_property
 
 from .extensions import db
 
 
 from datetime import datetime, timezone
+
+
+def _is_postgres_bound() -> bool:
+    bind = db.session.get_bind() if db.session else None
+    return bool(bind is not None and bind.dialect.name == 'postgresql')
 
 # ---------------------------------------------------------------------------
 # Администраторы и роли
@@ -81,8 +102,9 @@ class Address(db.Model):
     )
     id: int = db.Column(db.Integer, primary_key=True)
     name: str = db.Column(db.String(255), nullable=False, default='')
-    lat: float = db.Column(db.Float, nullable=True)
-    lon: float = db.Column(db.Float, nullable=True)
+    _lat: float = db.Column('lat', db.Float, nullable=True)
+    _lon: float = db.Column('lon', db.Float, nullable=True)
+    geom = db.Column(Geometry(geometry_type='POINT', srid=4326), nullable=True)
     notes: str = db.Column(db.Text, nullable=True)
     status: str = db.Column(db.String(64), nullable=True)
     link: str = db.Column(db.String(512), nullable=True)
@@ -90,8 +112,38 @@ class Address(db.Model):
     zone_id = db.Column(db.Integer, db.ForeignKey('zone.id'), nullable=True)
     zone = db.relationship('Zone', lazy='joined')
     photo: str = db.Column(db.String(128), nullable=True)
+    ai_tags = db.Column(db.JSON().with_variant(JSONB, 'postgresql'), nullable=True)
+    priority = db.Column(db.Integer, nullable=True)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    @hybrid_property
+    def lat(self) -> Optional[float]:
+        return self._lat
+
+    @lat.setter
+    def lat(self, value: Optional[float]) -> None:
+        self._lat = value
+        if _is_postgres_bound() and self._lat is not None and self._lon is not None:
+            self.geom = func.ST_SetSRID(func.ST_MakePoint(self._lon, self._lat), 4326)
+
+    @lat.expression
+    def lat(cls):
+        return cls._lat
+
+    @hybrid_property
+    def lon(self) -> Optional[float]:
+        return self._lon
+
+    @lon.setter
+    def lon(self, value: Optional[float]) -> None:
+        self._lon = value
+        if _is_postgres_bound() and self._lat is not None and self._lon is not None:
+            self.geom = func.ST_SetSRID(func.ST_MakePoint(self._lon, self._lat), 4326)
+
+    @lon.expression
+    def lon(cls):
+        return cls._lon
 
     def to_dict(self) -> Dict[str, Any]:
         """Преобразовать запись в словарь для JSON‑выдачи."""
@@ -106,6 +158,8 @@ class Address(db.Model):
             'category': self.category,
             'zone_id': self.zone_id,
             'photo': self.photo,
+            'ai_tags': self.ai_tags or [],
+            'priority': self.priority,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
         }
@@ -128,8 +182,9 @@ class PendingMarker(db.Model):
     )
     id: int = db.Column(db.Integer, primary_key=True)
     name: str = db.Column(db.String(255), nullable=False, default='')
-    lat: float = db.Column(db.Float, nullable=True)
-    lon: float = db.Column(db.Float, nullable=True)
+    _lat: float = db.Column('lat', db.Float, nullable=True)
+    _lon: float = db.Column('lon', db.Float, nullable=True)
+    geom = db.Column(Geometry(geometry_type='POINT', srid=4326), nullable=True)
     notes: str = db.Column(db.Text, nullable=True)
     status: str = db.Column(db.String(64), nullable=True)
     link: str = db.Column(db.String(512), nullable=True)
@@ -137,6 +192,8 @@ class PendingMarker(db.Model):
     zone_id = db.Column(db.Integer, db.ForeignKey('zone.id'), nullable=True)
     zone = db.relationship('Zone', lazy='joined')
     photo: str = db.Column(db.String(128), nullable=True)
+    ai_tags = db.Column(db.JSON().with_variant(JSONB, 'postgresql'), nullable=True)
+    priority = db.Column(db.Integer, nullable=True)
     # идентификатор пользователя бота или сообщения для трассировки
     user_id: str = db.Column(db.String(64), nullable=True)
     """Идентификатор пользователя, отправившего заявку через бот."""
@@ -146,6 +203,34 @@ class PendingMarker(db.Model):
     """Имя или контакт отправителя (может совпадать с user_id или быть строкой)."""
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    @hybrid_property
+    def lat(self) -> Optional[float]:
+        return self._lat
+
+    @lat.setter
+    def lat(self, value: Optional[float]) -> None:
+        self._lat = value
+        if _is_postgres_bound() and self._lat is not None and self._lon is not None:
+            self.geom = func.ST_SetSRID(func.ST_MakePoint(self._lon, self._lat), 4326)
+
+    @lat.expression
+    def lat(cls):
+        return cls._lat
+
+    @hybrid_property
+    def lon(self) -> Optional[float]:
+        return self._lon
+
+    @lon.setter
+    def lon(self, value: Optional[float]) -> None:
+        self._lon = value
+        if _is_postgres_bound() and self._lat is not None and self._lon is not None:
+            self.geom = func.ST_SetSRID(func.ST_MakePoint(self._lon, self._lat), 4326)
+
+    @lon.expression
+    def lon(cls):
+        return cls._lon
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -159,6 +244,8 @@ class PendingMarker(db.Model):
             'category': self.category,
             'zone_id': self.zone_id,
             'photo': self.photo,
+            'ai_tags': self.ai_tags or [],
+            'priority': self.priority,
             'user_id': self.user_id,
             'message_id': self.message_id,
             'reporter': self.reporter,

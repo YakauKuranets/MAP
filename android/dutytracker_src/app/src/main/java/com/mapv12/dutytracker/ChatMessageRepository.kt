@@ -3,6 +3,7 @@ package com.mapv12.dutytracker
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.first
 
 /**
  * Repository для отправки сообщений chat2 с поддержкой outbox.
@@ -44,7 +45,7 @@ class ChatMessageRepository(
      */
     fun flushOutbox() {
         ioScope.launch {
-            val queued = db.chatMessageDao().getMessagesByStatus("queued")
+            val queued = db.chatMessageDao().observeMessagesByStatus("queued").first()
             for (msg in queued) {
                 try {
                     val resp = apiSendMessage(msg)
